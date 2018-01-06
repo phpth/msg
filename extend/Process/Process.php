@@ -15,16 +15,10 @@ class Process
     protected $process_num;
 
     /**
-     * pid 文件目录
+     * 运行时文件目录
      * @var string
      */
-    protected $process_pid_tmp_path ;
-
-    /**
-     * 父进程是各个子进程的pid 数组， 子进程里面是此进程的pid文件字串
-     * @var
-     */
-    protected $work_lock_file ;
+    protected $run_tmp_file_path ;
 
     /**
      * 进程标题头
@@ -48,6 +42,12 @@ class Process
      * @var int
      */
     protected static $new_count = 0;
+
+    /**
+     * 执行模式
+     * @var
+     */
+    protected $model ;
 
     /**
      * 当前进程类型 （父进程是1，子进程是0）
@@ -80,28 +80,47 @@ class Process
     public $process_list;
 
     /**
-     * 子进程运行时创建的文件，结束时会自动删除
+     * 程序运行日志文件
      * @var
      */
-    public $child_runing_pid_file ;
+    public $log_file ;
+
+    /**
+     * 当前进程号
+     * @var
+     */
+    public $pid ;
+
+    /**
+     * 工作进程编号
+     * @var
+     */
+    protected $work_id ;
+
+    protected $master_pid;
+
+    protected $ready_num  = 0;
 
     /**
      * Process constructor.
      * @param $process_num
      * @param $process_title
      * @param $callbacks
+     * @param int $model 1代表一直执行 ， 0 代表只执行一次
      * @param int $memory_limit
-     * @param bool|string $process_pid_tmp_path
+     * @param bool $run_tmp_file_path
      * @throws Exception
      */
-    public function __construct( $process_num , $process_title , $callbacks , $memory_limit =200 ,$process_pid_tmp_path = false)
+    public function __construct( $process_num , $process_title , $callbacks ,$model = 1 , $memory_limit =200 ,$run_tmp_file_path = false)
     {
         if (stripos(PHP_SAPI,'cli' ) === false)
         {
             throw new Exception('多进程模式请在cli模式下运行!');
         }
+        $this->model = $model ;
         self::$new_count +=1;
         $this->memory_limit = $memory_limit ;
+        $this->pid = $this->master_pid = getmypid() ;
         $this->process_title = "{$process_title}".self::$new_count;
         is_numeric( $process_num ) ?$this->process_num = $process_num  : $this->process_num = 1;
         $this->process_num > 0? : $this->process_num = 1 ;
@@ -134,19 +153,19 @@ class Process
                 $this->callbacks[] = $callbacks ;
             }
         }
-
-        $this->process_pid_tmp_path   =( $process_pid_tmp_path? : __DIR__.'/run/');
-        if(!is_dir($this->process_pid_tmp_path))
+        $this->run_tmp_file_path   =( $run_tmp_file_path? : __DIR__.'/run/');
+        if(!is_dir($this->run_tmp_file_path))
         {
             try{
-                mkdir($this->process_pid_tmp_path,0777,true);
+                mkdir($this->run_tmp_file_path,0777,true);
             }
             catch(Exception $e)
             {
                 throw new Exception( 'pid 文件目录创建失败!' );
             }
         }
-        $this->createChildFile();
+        $this->run_tmp_file_path = realpath($this->run_tmp_file_path);
+        $this->log_file = $this->run_tmp_file_path.'/'.self::$new_count."_{$process_title}.log" ;
     }
 
     /**
@@ -155,22 +174,14 @@ class Process
      * @param float $sleep
      * @return bool
      */
-    public function run($repeat=true,$sleep = 0.1)
+    public function run($repeat=true,$sleep = 0.1 )
     {
-        #创建子进程的阻塞文件
-        try{
-            $this->block();
-        }
-        catch(Exception $e){
-            $this->last_error = $e->getMessage() ;
-            return false ;
-        }
         # 父进程名称设置
         $this->processTitle('master');
         # 父进程信号处理
         $this->registerSignal();
+        pcntl_signal(SIGUSR2, array($this, 'signalHandle'));
         $this->run_param = array($repeat,$sleep);
-        $pid_file_arr = array_keys($this->work_lock_file);
         for ($i=0;$i<$this->process_num;$i++)
         {
             $this->process_list[$i] = pcntl_fork() ;
@@ -178,28 +189,39 @@ class Process
             {
                 # 注册信号处理
                 $this->registerSignal();
+                $this->pid = getmypid();
                 # 设置进程名称
                 $this->processTitle("work{$i}");
-                # 设置子进程pid文件
-                $this->work_lock_file = current($pid_file_arr) ;
                 # 设置子进程执行体
                 $this->run_param[3] = $this->callbacks[$i];
+                $this->work_id      = $i;
                 goto work ;
             }
             else if($this->process_list[$i] == -1)
             {
                 goto error;
             }
-            next($pid_file_arr);
         }
         master:
+        $this->waitChildReady();
         return true ;
         work:
         $this->work(...$this->run_param );
-        return true;
+        exit;
         error:
         $this->stop();
         return false ;
+    }
+
+    /**
+     * 等待子进程就绪
+     */
+    protected function waitChildReady()
+    {
+        while ($this->ready_num < $this->process_num)
+        {
+            $this->sleep(0.01);
+        }
     }
 
     /**
@@ -208,9 +230,9 @@ class Process
     protected function cleanWork()
     {
         $this->process_type = 0;
+        $this->last_error = 0 ;
         unset($this->process_list);
         unset($this->process_num);
-        unset($this->last_error);
         unset($this->callbacks);
         unset($this->run_param);
     }
@@ -226,11 +248,8 @@ class Process
         try{
             # 工作进程清理
             $this->cleanWork();
-            $this->getLock($this->work_lock_file);
-            $pid = getmypid();
-            $this->child_runing_pid_file = $this->process_pid_tmp_path."child_run_pid_{$pid}.pid";
-            file_put_contents($this->child_runing_pid_file,microtime(true));
-
+            posix_kill($this->master_pid, SIGUSR2 );
+            pcntl_sigwaitinfo(array(SIGHUP),$sig_info);
             do{
                 call_user_func($callback);
                 if($this->stop_signal)# 信号停止
@@ -241,14 +260,24 @@ class Process
                 {
                     break;
                 }
-                usleep($sleep*1000000);
-            }while($repeat);
+                $this->sleep($sleep);
+            }while($repeat && $this->model );
+            $this->last_error = "no error ! child process exited by normal!";
         }
-        catch(ErrorException|Exception|\RuntimeException $e)
+        catch(Exception|\RuntimeException $e)
         {
-            echo $e->getMessage(),PHP_EOL;
+            #记录日志文件
+            $this->last_error = " {$e->getMessage()} on file {$e->getFile()} in line {$e->getLine()} {$e->getTraceAsString()} {$e->getCode()}" ;
         }
-        exit;
+    }
+
+    /**
+     * 增强sleep 可以小数
+     * @param $sleep
+     */
+    public function sleep($sleep)
+    {
+        usleep($sleep*1000000);
     }
 
     /**
@@ -277,7 +306,7 @@ class Process
     protected function registerSignal()
     {
         #pcntl_signal(SIGCHLD, array($this, 'signalHandle'));
-        pcntl_signal(SIGHUP, array($this, 'signalHandle'));
+        pcntl_signal(SIGUSR1, array($this, 'signalHandle'));
         pcntl_signal(SIGINT, array($this, 'signalHandle'));
         pcntl_signal(SIGTERM, array($this, 'signalHandle'));
     }
@@ -293,7 +322,7 @@ class Process
             case SIGTERM :
                 $this->stop_signal = 1 ;
                 break;
-            case SIGHUP:
+            case SIGUSR1:
                 if($this->process_type != 1 )
                 {
                     $this->stop_signal = 1 ;
@@ -308,77 +337,29 @@ class Process
                 break;
             case SIGCHLD:
                 break ;
+            case SIGUSR2:
+                if($this->process_type)
+                {
+                    $this->ready_num += 1;
+                }
             default:
         }
     }
 
     /**
-     * 锁定进程
-     * @throws Exception
-     */
-    protected function block()
-    {
-        foreach($this->work_lock_file  as $k=>$v)
-        {
-            if(!flock($this->work_lock_file[$k], LOCK_EX))
-            {
-                foreach($this->work_lock_file as $v)
-                {
-                    flock($v, LOCK_UN);
-                }
-                throw new Exception('堵塞遇到失败') ;
-            }
-        }
-        //todo：用信号实现阻塞 ；
-    }
-
-    /**
-     * 创建阻塞文件
-     */
-    protected function createChildFile()
-    {
-        for ($i=0;$i<$this->process_num;$i++)
-        {
-            $path = $this->pidFilePath($i) ;
-            $this->work_lock_file[$path]  = fopen($path,'a+') ;
-        }
-    }
-
-    /**
-     * 释放进程
+     * 解阻塞
      * @throws Exception
      */
     protected function  unBlock()
     {
-        if(is_array($this->work_lock_file)) // 父进程执行，子进程不执行
+        if($this->process_list)
         {
-            foreach( $this->work_lock_file as $k=>$v)
+            foreach($this->process_list as $v)
             {
-                if(!flock($this->work_lock_file[$k], LOCK_UN))
-                {
-                    throw new Exception('解堵塞遇到失败') ;
-                }
+                posix_kill($v, SIGHUP);
             }
         }
-        //todo：用信号实现解阻塞 ；
     }
-
-    /**
-     * 子进程
-     * @param bool $lock_file
-     */
-    protected function getLock($lock_file = false )
-    {
-        if($lock_file)
-        {
-            $handle = fopen($lock_file,'a+');
-            flock($handle,LOCK_EX);
-            flock($handle, LOCK_UN);
-            fclose($handle);
-        }
-        //todo: 用信号实现阻塞；
-    }
-
 
     /**
      * 开始所有子进程执行
@@ -388,7 +369,9 @@ class Process
     {
         try{
             $this->unBlock();
+            $this->last_error = 0 ;
             $this->wait();
+            $this->last_error = "no error mast process exited by normal !";
             return true;
         }
         catch(Exception $e)
@@ -403,7 +386,6 @@ class Process
      */
     protected function wait()
     {
-
         repeat :
         foreach ( $this->process_list as $k=>$v)
         {
@@ -444,24 +426,34 @@ class Process
             {
                 goto repeat;
             }
+            $this->last_error = "work_id:master,pid:{$this->pid},error:stoped by signal !";
             echo "stoped!",PHP_EOL;
             return true ;
         }
         # 检测进程是否足够数 ，不足则从新fork
-        $this->reCreate();
+        $this->model && $this->reCreate();
         if(count($this->process_list)> 0)
         {
-            echo 'hang!' ,PHP_EOL ;
             goto repeat;
         }
     }
 
     /**
-     *  pid文件目录
+     * @param $message
+     * @throws Exception
      */
-    protected function pidFilePath($id)
+    protected function logFile($message)
     {
-        return $this->process_pid_tmp_path."/{$this->process_title}_work{$id}.lock";
+        $handle = fopen($this->log_file,'ab+');
+        if($handle)
+        {
+            flock($handle,LOCK_EX);
+            fwrite($handle, $message);
+        }
+        else
+        {
+            throw new Exception('无法记录错误信息');
+        }
     }
 
     /**
@@ -487,12 +479,12 @@ class Process
                     $this->processTitle("work{$v}");
                     # 配对回调
                     $this->run_param[3] = $this->callbacks[$v];
-                    $this->work_lock_file = $this->pidFilePath($v);
                     goto work;
                 }
                 else if($this->process_list[$v] > 0)
                 {
-                    echo "create work{$v}!",PHP_EOL ;
+                    $error_string = "child process [work{$v}] has stoped , master is reCreated , new [work{$v}] pid is {$this->process_list[$v]}" .date('Y-m-d H:i:s').PHP_EOL;
+                    file_put_contents($this->log_file, $error_string ,FILE_APPEND | LOCK_EX) ;
                 }
             }
         }
@@ -500,7 +492,7 @@ class Process
         return true ;
         work:
         $this->work(...$this->run_param);
-        return true ;
+        exit;
     }
 
     /**
@@ -538,41 +530,33 @@ class Process
             foreach($this->process_list as $k=>$v)
             {
                 posix_kill($v,SIGHUP);
+                posix_kill($v,SIGUSR1);
             }
         }
     }
 
-    /**
-     * 平滑重启
-     */
-    public function reload()
-    {
-
-    }
-
-    public function isRun()
-    {
-
-    }
-
     public function __destruct()
     {
+        $error_string = '';
         try{
             if($this->process_type == 1)
             {
+                // master process finished do this
+                $error_string = "work_id:master,pid:{$this->pid},error:[{$this->last_error}],".date('Y-m-d H:i:s').PHP_EOL;
                 $this->turnStop();
                 $this->unBlock();
-                if(is_array($this->work_lock_file))
-                {
-                    foreach($this->work_lock_file as $k=>$v)
-                    {
-                        fclose($this->work_lock_file[$k]);
-                    }
-                }
             }
             else
             {
-                unlink($this->child_runing_pid_file);
+                // child process finished do this
+                if($this->last_error)
+                {
+                    $error_string = "work_id:{$this->work_id},pid:{$this->pid},error:[{$this->last_error}],".date('Y-m-d H:i:s').PHP_EOL;
+                }
+            }
+            if($error_string)
+            {
+                file_put_contents($this->log_file, $error_string,FILE_APPEND | LOCK_EX);
             }
         }
         catch(Exception $e) {}

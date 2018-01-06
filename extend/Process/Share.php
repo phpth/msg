@@ -32,7 +32,8 @@ class Share
                 throw new Exception('创建目录失败或者目录不可用！');
             }
         }
-        $this->tmp_file = realpath($path)."/{$project}.tmp";
+        $id = md5($path);
+        $this->tmp_file = realpath($path)."/{$id}_{$project}.tmp";
         if(file_put_contents($this->tmp_file, $this->share_id)===false)
         {
             throw new Exception('文件目录不可写!');
@@ -90,6 +91,7 @@ class Share
      */
     public function remove()
     {
+        unlink($this->tmp_file);
         return shm_remove($this->share_resource);
     }
 
@@ -121,10 +123,6 @@ class Share
         if($this->share_resource)
         {
             shm_detach($this->share_resource);
-        }
-        if(file_exists($this->tmp_file))
-        {
-            unlink($this->tmp_file);
         }
     }
 }

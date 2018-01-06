@@ -41,8 +41,8 @@ class Mobile
             }
             if($this->makeFile($pid_path, getmypid()))
             {
-                $process = new Process($this->run_param['process'], 'mobile', array($this,'work'),$this->run_param['memory'],$this->run_param['pid_path']);
-                if($process->run($this->run_param['repeat'],$this->run_param['sleep']))
+                $process = new Process($this->run_param['process'], 'mobile',  array($this,'work'), 0 , $this->run_param['memory'],$this->run_param['pid_path']);
+                if($process->run(0,$this->run_param['sleep']))
                 {
                     $process->start();
                 }
@@ -128,7 +128,7 @@ class Mobile
             $this->sms_api = new Sms($api, $api_able['hangye']);
         }
         $json_data = $this->queue->pop(MOBILE_QUEUE);
-        if($json_data)
+        if(/*$json_data*/ 0)
         {
             $this->sms_api->send($to, $content);
         }
