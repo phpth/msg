@@ -180,7 +180,7 @@ class Process
         $this->processTitle('master');
         # 父进程信号处理
         $this->registerSignal();
-        pcntl_signal(SIGUSR2, array($this, 'signalHandle'));
+        pcntl_signal(SIGHUP, array($this, 'signalHandle'));
         $this->run_param = array($repeat,$sleep);
         for ($i=0;$i<$this->process_num;$i++)
         {
@@ -195,6 +195,8 @@ class Process
                 # 设置子进程执行体
                 $this->run_param[3] = $this->callbacks[$i];
                 $this->work_id      = $i;
+                posix_kill($this->master_pid, SIGHUP );
+                pcntl_sigwaitinfo(array(SIGUSR2),$sig_info);
                 goto work ;
             }
             else if($this->process_list[$i] == -1)
@@ -248,8 +250,6 @@ class Process
         try{
             # 工作进程清理
             $this->cleanWork();
-            posix_kill($this->master_pid, SIGUSR2 );
-            pcntl_sigwaitinfo(array(SIGHUP),$sig_info);
             do{
                 call_user_func($callback);
                 if($this->stop_signal)# 信号停止
@@ -269,6 +269,7 @@ class Process
             #记录日志文件
             $this->last_error = " {$e->getMessage()} on file {$e->getFile()} in line {$e->getLine()} {$e->getTraceAsString()} {$e->getCode()}" ;
         }
+        #exit;
     }
 
     /**
@@ -337,7 +338,7 @@ class Process
                 break;
             case SIGCHLD:
                 break ;
-            case SIGUSR2:
+            case SIGHUP:
                 if($this->process_type)
                 {
                     $this->ready_num += 1;
@@ -356,7 +357,7 @@ class Process
         {
             foreach($this->process_list as $v)
             {
-                posix_kill($v, SIGHUP);
+                posix_kill($v, SIGUSR2);
             }
         }
     }
@@ -436,6 +437,7 @@ class Process
         {
             goto repeat;
         }
+        echo 'sdfs';
     }
 
     /**
